@@ -1,1 +1,1 @@
-Copy your new script here
+Copy of new script here
