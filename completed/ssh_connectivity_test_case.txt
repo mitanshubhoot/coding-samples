@@ -1,0 +1,259 @@
+================================================================================
+TEST CASE: SSH Connectivity – Password and Key-Based Authentication
+================================================================================
+
+Test Case ID  : TC-SSH-001
+Title         : Verify SSH connectivity using password authentication and
+                public-key authentication on an Ubuntu Server target
+Author        : Mitanshu Bhoot
+Date          : 2026-02-28
+
+--------------------------------------------------------------------------------
+1. OBJECTIVE
+--------------------------------------------------------------------------------
+Confirm that an Ubuntu Server target correctly accepts SSH connections
+authenticated with both a password and an RSA/ED25519 public key, and that it
+rejects connections when invalid credentials are supplied.
+
+--------------------------------------------------------------------------------
+2. SCOPE
+--------------------------------------------------------------------------------
+- Password-based SSH authentication (keyboard-interactive / password method)
+- Public-key SSH authentication (RSA 4096-bit and ED25519)
+- Negative testing: invalid password and invalid/revoked key should be rejected
+
+Out of scope: host-key verification (covered by a separate test case), SFTP,
+and SCP.
+
+--------------------------------------------------------------------------------
+3. TEST ENVIRONMENT
+--------------------------------------------------------------------------------
+Role             | Hostname / IP       | OS                  | Notes
+-----------------|---------------------|---------------------|------------------
+SSH Client       | client.local        | Ubuntu 24.04 LTS    | Standard install
+SSH Target/DUT   | dut.local           | Ubuntu Server 24.04 | Device under test
+Network          | Same subnet (LAN)   | –                   | No firewall rules
+                 |                     |                     | blocking port 22
+
+Software / tools:
+  - OpenSSH client  (ssh, ssh-keygen, ssh-copy-id) – pre-installed
+  - OpenSSH server  (sshd)                          – pre-installed on DUT
+  - sshpass 1.09+   (password auth automation)      – apt install sshpass
+
+--------------------------------------------------------------------------------
+4. PREREQUISITES
+--------------------------------------------------------------------------------
+4.1  Both machines are powered on and reachable over the network.
+4.2  OpenSSH server (sshd) is installed and running on the DUT:
+       $ systemctl is-active ssh
+       active
+4.3  A test user account ("testuser") with a known password exists on the DUT:
+       $ sudo adduser testuser   # set password: T3stP@ssw0rd
+4.4  Port 22 is open on the DUT (no host firewall blocking it):
+       $ sudo ufw allow 22/tcp
+4.5  sshd_config on the DUT has the following settings (defaults on Ubuntu):
+       PasswordAuthentication yes
+       PubkeyAuthentication   yes
+       PermitRootLogin        no
+4.6  The SSH client machine has sshpass installed:
+       $ sudo apt install -y sshpass
+
+--------------------------------------------------------------------------------
+5. TEST SETUP (executed once before running test steps)
+--------------------------------------------------------------------------------
+SETUP-1  On the CLIENT, generate two key pairs (RSA and ED25519) for
+         "testuser":
+           $ ssh-keygen -t rsa     -b 4096 -f ~/.ssh/id_rsa_test     -N ""
+           $ ssh-keygen -t ed25519         -f ~/.ssh/id_ed25519_test  -N ""
+
+SETUP-2  Copy the RSA public key to the DUT:
+           $ ssh-copy-id -i ~/.ssh/id_rsa_test.pub \
+               -o PasswordAuthentication=yes \
+               testuser@dut.local
+
+SETUP-3  Copy the ED25519 public key to the DUT:
+           $ ssh-copy-id -i ~/.ssh/id_ed25519_test.pub \
+               -o PasswordAuthentication=yes \
+               testuser@dut.local
+
+SETUP-4  Generate a separate "invalid" key pair that is NOT copied to the DUT:
+           $ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_invalid -N ""
+
+SETUP-5  Verify the DUT's ~/.ssh/authorized_keys contains both public keys:
+           $ ssh -i ~/.ssh/id_rsa_test testuser@dut.local \
+               "cat ~/.ssh/authorized_keys"
+
+--------------------------------------------------------------------------------
+6. TEST STEPS AND PASS / FAIL CRITERIA
+--------------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+TC-SSH-001-01: Password authentication – valid credentials
+------------------------------------------------------------------------
+Description:
+  Connect to the DUT using sshpass with the correct password and confirm
+  that a shell session is established.
+
+Command:
+  $ sshpass -p 'T3stP@ssw0rd' \
+      ssh -o PreferredAuthentications=password \
+          -o PubkeyAuthentication=no \
+          -o StrictHostKeyChecking=no \
+          testuser@dut.local \
+          "echo AUTH_OK && hostname"
+
+Pass criteria:
+  - Exit code is 0.
+  - stdout contains the string "AUTH_OK".
+  - stdout contains the DUT's hostname.
+
+Fail criteria:
+  - Exit code is non-zero.
+  - Output contains "Permission denied" or "Authentication failed".
+
+------------------------------------------------------------------------
+TC-SSH-001-02: Password authentication – invalid credentials
+------------------------------------------------------------------------
+Description:
+  Attempt to connect with an intentionally wrong password and confirm
+  that the connection is refused.
+
+Command:
+  $ sshpass -p 'WrongPassword!' \
+      ssh -o PreferredAuthentications=password \
+          -o PubkeyAuthentication=no \
+          -o StrictHostKeyChecking=no \
+          -o NumberOfPasswordPrompts=1 \
+          testuser@dut.local \
+          "echo AUTH_OK"
+
+Pass criteria:
+  - Exit code is non-zero (typically 5 from sshpass, or 1 from ssh).
+  - stdout does NOT contain "AUTH_OK".
+  - stderr or ssh verbose output (-v) contains "Permission denied".
+
+Fail criteria:
+  - Exit code is 0.
+  - The session is opened with an invalid password.
+
+------------------------------------------------------------------------
+TC-SSH-001-03: Public-key authentication – RSA 4096-bit key
+------------------------------------------------------------------------
+Description:
+  Connect using the RSA key installed during setup and verify that no
+  password prompt is issued and the session is established.
+
+Command:
+  $ ssh -i ~/.ssh/id_rsa_test \
+        -o PreferredAuthentications=publickey \
+        -o PasswordAuthentication=no \
+        -o StrictHostKeyChecking=no \
+        testuser@dut.local \
+        "echo AUTH_OK && hostname"
+
+Pass criteria:
+  - Exit code is 0.
+  - stdout contains "AUTH_OK" and the DUT hostname.
+  - No password prompt appears.
+
+Fail criteria:
+  - Exit code is non-zero.
+  - A password prompt is shown.
+  - Output contains "Permission denied".
+
+------------------------------------------------------------------------
+TC-SSH-001-04: Public-key authentication – ED25519 key
+------------------------------------------------------------------------
+Description:
+  Repeat TC-SSH-001-03 using the ED25519 key pair to confirm that the
+  modern key type is also accepted.
+
+Command:
+  $ ssh -i ~/.ssh/id_ed25519_test \
+        -o PreferredAuthentications=publickey \
+        -o PasswordAuthentication=no \
+        -o StrictHostKeyChecking=no \
+        testuser@dut.local \
+        "echo AUTH_OK && hostname"
+
+Pass criteria:
+  - Same as TC-SSH-001-03.
+
+Fail criteria:
+  - Same as TC-SSH-001-03.
+
+------------------------------------------------------------------------
+TC-SSH-001-05: Public-key authentication – unregistered key rejected
+------------------------------------------------------------------------
+Description:
+  Attempt to connect using a key that was NOT added to authorized_keys
+  and confirm the connection is denied.
+
+Command:
+  $ ssh -i ~/.ssh/id_ed25519_invalid \
+        -o PreferredAuthentications=publickey \
+        -o PasswordAuthentication=no \
+        -o StrictHostKeyChecking=no \
+        testuser@dut.local \
+        "echo AUTH_OK"
+
+Pass criteria:
+  - Exit code is non-zero (255 / 1).
+  - stdout does NOT contain "AUTH_OK".
+  - stderr contains "Permission denied (publickey)".
+
+Fail criteria:
+  - Exit code is 0.
+  - Session is established with an unregistered key.
+
+------------------------------------------------------------------------
+TC-SSH-001-06: Both auth methods available simultaneously
+------------------------------------------------------------------------
+Description:
+  Confirm that when both PasswordAuthentication and PubkeyAuthentication
+  are enabled, the client can connect using either method without
+  reconfiguring sshd.
+
+Steps:
+  a. Connect using the RSA key (TC-SSH-001-03) – must succeed.
+  b. Immediately after, connect using the password (TC-SSH-001-01) – must
+     succeed, without restarting sshd between the two connections.
+
+Pass criteria:
+  - Both connections succeed (exit code 0, "AUTH_OK" in stdout).
+
+Fail criteria:
+  - Either connection fails.
+
+--------------------------------------------------------------------------------
+7. TEARDOWN (executed once after all test steps)
+--------------------------------------------------------------------------------
+TEARDOWN-1  Remove the test key pairs from the DUT's authorized_keys:
+              $ ssh -i ~/.ssh/id_rsa_test testuser@dut.local \
+                  "sed -i '/id_rsa_test\|id_ed25519_test/d' \
+                   ~/.ssh/authorized_keys"
+
+TEARDOWN-2  Delete the generated key pairs from the client:
+              $ rm -f ~/.ssh/id_rsa_test ~/.ssh/id_rsa_test.pub
+              $ rm -f ~/.ssh/id_ed25519_test ~/.ssh/id_ed25519_test.pub
+              $ rm -f ~/.ssh/id_ed25519_invalid ~/.ssh/id_ed25519_invalid.pub
+
+TEARDOWN-3  Optionally remove the testuser account from the DUT if it was
+            created solely for this test:
+              $ sudo deluser --remove-home testuser
+
+--------------------------------------------------------------------------------
+8. NOTES
+--------------------------------------------------------------------------------
+- All ssh commands should be run with -v (verbose) when debugging failures;
+  the extra output pinpoints exactly which authentication method was attempted
+  and why it was rejected.
+- If PasswordAuthentication is disabled globally in /etc/ssh/sshd_config,
+  TC-SSH-001-01 and TC-SSH-001-02 are expected to fail; document the sshd
+  configuration in the test report.
+- Timing: the full suite (setup through teardown) should complete in under
+  2 minutes on a standard LAN connection.
+
+================================================================================
+END OF TEST CASE
+================================================================================
